@@ -3,6 +3,7 @@ import pandas as pd
 import streamlit as st
 from utils import extract_text_from_file
 from pipeline import search_and_rank, load_config
+from tailor import local_tailor, openai_tailor
 
 # ---------- App setup ----------
 st.set_page_config(page_title="Career Champs", layout="wide", page_icon="🧑‍💼")
@@ -14,7 +15,7 @@ st.caption("Multi-source, high-paying roles matched to your CV. Auto-tailor + co
 def cached_search(cv_text: str, prefs_json: str):
     """
     Cache the heavy search across sources + ranking for 5 minutes.
-    We pass a JSON string (stable, hashable) so cache keys are deterministic.
+    Use a JSON string (stable, hashable) for deterministic cache keys.
     """
     prefs = json.loads(prefs_json)
     return search_and_rank(cv_text, prefs)
@@ -95,32 +96,7 @@ if go:
     if not jobs:
         st.warning("No results found. Try broader titles/location or lower min salary.")
     else:
-        st.success(f"Found {len(jobs)} roles. Top matches first.")
-
-        # ---------- Card-style results ----------
-        for i, j in enumerate(jobs[:100]):  # render top 100 for performance
-            sc = j.get("_scores", {})
-            comp = j.get("_comp", {})
-            with st.container(border=True):
-                cols = st.columns([0.65, 0.35])
-                with cols[0]:
-                    st.markdown(f"### {j.get('title', '(no title)')}")
-                    st.markdown(f"**{j.get('company', 'Unknown')}** — {j.get('location', '')}")
-                    est = comp.get("annual_gbp")
-                    est_txt = f"{round(est):,}" if est else "—"
-                    st.markdown(
-                        f"Score: **{sc.get('final', 0):.2f}** · Est £(COL-adj): **{est_txt}** · Source: {j.get('source', '')}"
-                    )
-                    if j.get("description"):
-                        desc = j["description"]
-                        st.caption((desc[:260] + "…") if len(desc) > 260 else desc)
-                with cols[1]:
-                    if j.get("redirect_url"):
-                        st.link_button("Open role ↗", j["redirect_url"], use_container_width=True)
-                    st.caption(f"Posted: {j.get('created', '—')}")
-                    st.progress(min(1.0, max(0.0, sc.get("relevance", 0))), text="Relevance")
-
-        # ---------- CSV download ----------
+        # ---------- Build DataFrame once ----------
         rows = []
         for j in jobs:
             sc = j.get("_scores", {})
@@ -139,6 +115,75 @@ if go:
                 }
             )
         df = pd.DataFrame(rows)
+
+        st.success(f"Found {len(jobs)} roles. Top matches first.")
+
+        # ---------- View toggle (Cards vs Table) ----------
+        view_mode = st.radio(
+            "View",
+            ["Cards (best for skim)", "Table (crisp)"],
+            index=1,
+            horizontal=True,
+        )
+
+        # ---------- CSS to de-blur DataFrame ----------
+        st.markdown(
+            """
+            <style>
+              /* Bigger, crisper table text */
+              .stDataFrame, .stDataFrame div, .stDataFrame span {
+                font-size: 15px !important;
+                line-height: 1.3 !important;
+                -webkit-font-smoothing: antialiased !important;
+                -moz-osx-font-smoothing: grayscale !important;
+                text-rendering: optimizeLegibility !important;
+              }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if view_mode.startswith("Cards"):
+            # ---- Card-style list (top 100) ----
+            for i, j in enumerate(jobs[:100]):  # render top 100 for performance
+                sc = j.get("_scores", {})
+                comp = j.get("_comp", {})
+                with st.container(border=True):
+                    cols = st.columns([0.65, 0.35])
+                    with cols[0]:
+                        st.markdown(f"### {j.get('title','(no title)')}")
+                        st.markdown(f"**{j.get('company','Unknown')}** — {j.get('location','')}")
+                        est = comp.get("annual_gbp")
+                        est_txt = f"{round(est):,}" if est else "—"
+                        st.markdown(
+                            f"Score: **{sc.get('final', 0):.2f}** · Est £(COL-adj): **{est_txt}** · Source: {j.get('source','')}"
+                        )
+                        if j.get("description"):
+                            desc = j["description"]
+                            st.caption((desc[:260] + "…") if len(desc) > 260 else desc)
+                    with cols[1]:
+                        if j.get("redirect_url"):
+                            st.link_button("Open role ↗", j["redirect_url"], use_container_width=True)
+                        st.caption(f"Posted: {j.get('created','—')}")
+                        st.progress(min(1.0, max(0.0, sc.get("relevance", 0))), text="Relevance")
+        else:
+            # ---- Crisp table with proper column types ----
+            st.dataframe(
+                df,
+                use_container_width=True,
+                height=560,
+                column_config={
+                    "Score": st.column_config.NumberColumn(format="%.3f", help="Final ranking score"),
+                    "Est £ (COL-adj)": st.column_config.NumberColumn(format="£%d"),
+                    "Confidence": st.column_config.NumberColumn(format="%.2f"),
+                    "URL": st.column_config.LinkColumn("Open role", display_text="Open ↗"),
+                    "Posted": st.column_config.TextColumn(),
+                    "Source": st.column_config.TextColumn(),
+                },
+                hide_index=True,
+            )
+
+        # ---------- CSV download ----------
         st.download_button(
             "⬇️ Download results (CSV)",
             df.to_csv(index=False).encode("utf-8"),
@@ -146,3 +191,33 @@ if go:
             mime="text/csv",
             use_container_width=True,
         )
+
+        # ---------- Auto-tailor (CV + Letter) ----------
+        st.subheader("Auto-tailor (CV + Letter)")
+        if len(jobs) == 0:
+            st.info("Search first to enable auto-tailor.")
+        else:
+            sel = st.selectbox(
+                "Pick a role",
+                options=list(range(min(50, len(jobs)))),
+                format_func=lambda i: f'{jobs[i].get("title","")} @ {jobs[i].get("company","")}',
+            )
+            name = st.text_input("Your name (for letter)", "Fabian")
+            mode = st.radio("Mode", ["Local template (offline)", "OpenAI (if key set)"], index=0, horizontal=True)
+
+            if st.button("✍️ Generate tailor pack", use_container_width=True):
+                job = jobs[sel]
+                if "OpenAI" in mode:
+                    out = openai_tailor(cv_text, job, your_name=name) or "OPENAI_API_KEY not set. Falling back to local template."
+                    if out.startswith("OPENAI_API_KEY not set"):
+                        out = local_tailor(cv_text, job, your_name=name)
+                else:
+                    out = local_tailor(cv_text, job, your_name=name)
+                st.text_area("Tailored Output", value=out, height=350)
+                st.download_button(
+                    "⬇️ Download tailor.txt",
+                    out.encode("utf-8"),
+                    file_name="tailor_pack.txt",
+                    mime="text/plain",
+                    use_container_width=True,
+                )
