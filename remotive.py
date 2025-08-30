@@ -1,0 +1,1 @@
+print('Remotive fetch placeholder')

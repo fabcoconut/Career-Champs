@@ -1,0 +1,7 @@
+{
+  "sources": { "adzuna": true, "remotive": true, "greenhouse": false, "lever": false },
+  "greenhouse_boards": ["stripe", "revolut"],
+  "lever_boards": ["robinhood"],
+  "currency": "GBP",
+  "col_base_city": "London"
+}
