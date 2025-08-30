@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 from utils import extract_text_from_file
 from pipeline import search_and_rank, load_config
-from tailor import local_tailor, openai_tailor
 
 st.set_page_config(page_title="Career Champs", layout="wide", page_icon="🧑‍💼")
 st.title("Career Champs 🚀")
@@ -14,6 +13,11 @@ with st.sidebar:
     st.json(cfg["sources"], expanded=False)
     st.divider()
     st.write("COL Base City:", cfg.get("col_base_city","London"))
+    st.divider()
+    st.subheader("Performance")
+    fast_mode = st.toggle("⚡ Fast mode (recommended)", value=True, help="Fewer pages + smaller vectorizer for speed")
+    max_per_source = st.slider("Max results per source", 20, 200, 60, step=20)
+    strict_uk = st.toggle("🇬🇧 Strict UK only (when Market=gb)", value=True)
 
 col1, col2 = st.columns([1,1])
 with col1:
@@ -59,13 +63,37 @@ if go:
             "seniority": seniority,
             "must_have_keywords": [k.strip() for k in must_have.split(",") if k.strip()],
             "max_days_old": int(max_days_old),
-            "weights": weights
+            "weights": weights,
+            "max_per_source": int(max_per_source),
+            "fast_mode": bool(fast_mode),
+            "strict_uk": bool(strict_uk)
         }
         jobs = search_and_rank(cv_text, prefs)
 
     if not jobs:
         st.warning("No results found. Try broader titles/location or lower min salary.")
     else:
+        # Card-style list
+        st.success(f"Found {len(jobs)} roles. Top matches first.")
+        for i, j in enumerate(jobs[:100]):  # render top 100 for performance
+            sc = j.get("_scores",{})
+            comp = j.get("_comp",{})
+            with st.container(border=True):
+                cols = st.columns([0.65, 0.35])
+                with cols[0]:
+                    st.markdown(f"### {j.get('title','(no title)')}")
+                    st.markdown(f"**{j.get('company','Unknown')}** — {j.get('location','')}")
+                    st.markdown(f"Score: **{sc.get('final',0):.2f}** · Est £(COL-adj): **{(comp.get('annual_gbp') and round(comp.get('annual_gbp')) or '—')}** · Source: {j.get('source','')}")
+                    if j.get('description'):
+                        st.caption((j['description'][:260] + "…") if len(j['description'])>260 else j['description'])
+                with cols[1]:
+                    if j.get("redirect_url"):
+                        st.link_button("Open role ↗", j["redirect_url"], use_container_width=True)
+                    st.caption(f"Posted: {j.get('created','—')}")
+                    st.progress(min(1.0, max(0.0, sc.get('relevance',0))), text="Relevance")
+
+        # CSV download
+        import pandas as pd
         rows = []
         for j in jobs:
             sc = j.get("_scores",{})
@@ -82,22 +110,5 @@ if go:
                 "URL": j.get("redirect_url")
             })
         df = pd.DataFrame(rows)
-        st.success(f"Found {len(df)} roles from multiple sources. Sorted by fit.")
-        st.dataframe(df, use_container_width=True, hide_index=True)
-
-        st.subheader("Auto-tailor (CV + Letter)")
-        sel = st.selectbox("Pick a role", options=list(range(min(50, len(jobs)))),
-                           format_func=lambda i: f'{jobs[i].get("title","")} @ {jobs[i].get("company","")}')
-        name = st.text_input("Your name (for letter)", "Fabian")
-        mode = st.radio("Mode", ["Local template (offline)", "OpenAI (if key set)"], index=0, horizontal=True)
-
-        if st.button("✍️ Generate tailor pack", use_container_width=True):
-            job = jobs[sel]
-            if "OpenAI" in mode:
-                out = openai_tailor(cv_text, job, your_name=name) or "OPENAI_API_KEY not set. Falling back to local template."
-                if out.startswith("OPENAI_API_KEY not set"):
-                    out = local_tailor(cv_text, job, your_name=name)
-            else:
-                out = local_tailor(cv_text, job, your_name=name)
-            st.text_area("Tailored Output", value=out, height=350)
-            st.download_button("⬇️ Download tailor.txt", out.encode("utf-8"), file_name="tailor_pack.txt", mime="text/plain", use_container_width=True)
+        st.download_button("⬇️ Download results (CSV)", df.to_csv(index=False).encode("utf-8"),
+                           file_name="career_champs_results.csv", mime="text/csv", use_container_width=True)
