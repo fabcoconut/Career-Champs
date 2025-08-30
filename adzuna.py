@@ -1,1 +1,0 @@
-print('Adzuna fetch placeholder')
