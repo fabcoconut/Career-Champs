@@ -1,1 +1,0 @@
-print('Comp intel placeholder')
